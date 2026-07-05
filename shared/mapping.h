@@ -13,7 +13,7 @@ typedef struct {
   void *get_module_handle_a;
 
   void *pbase;
-  void *hmodule;
+  uint32_t success;
   uint32_t fwd_reason_param;
   void *reserved_param;
   uint8_t seh_support;
