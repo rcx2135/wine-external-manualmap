@@ -178,3 +178,13 @@ typedef struct _IMAGE_EXPORT_DIRECTORY {
 	uint32_t	AddressOfNames;
 	uint32_t	AddressOfNameOrdinals;
 } IMAGE_EXPORT_DIRECTORY,*PIMAGE_EXPORT_DIRECTORY;
+
+
+typedef struct _RUNTIME_FUNCTION {
+    uint32_t BeginAddress;
+    uint32_t EndAddress;
+    uint32_t UnwindInfoAddress;
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
+#define WINAPIV __cdecl
+#define IMAGE_NT_OPTIONAL_HDR64_MAGIC 0x20b
+#define DLL_PROCESS_ATTACH 1

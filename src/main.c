@@ -1,12 +1,12 @@
-
-#include <stdio.h>
 #define _GNU_SOURCE
+#include <stdio.h>
 #include <sys/uio.h>
 
-#include "../lib/ptrace_do/libptrace_do.h"
 #include "pe.h"
-
+#include "../shared/mapping.h"
+#include "../lib/ptrace_do/libptrace_do.h"
 #define HEADER_SIZE 0x1000
+
 
 typedef struct {
   void *base;
@@ -115,6 +115,11 @@ int get_module(pid_t pid, const char *module_name, remote_module_t *module) {
     free_module(module);
     return -1;
   }
+
+  if (module->nt->OptionalHeader.SizeOfHeaders > HEADER_SIZE) {
+    // ignore this for a bit, will come back to this
+  }
+
   printf("NT signature: 0x%X\n", module->nt->Signature);
   printf("img size: %d\n", module->nt->OptionalHeader.SizeOfImage);
 
@@ -165,12 +170,9 @@ void *get_function_address(remote_module_t *module, char *function_name) {
   return 0;
 }
 
-
-
 int main(int argc, char *argv[]) {
   int err = 0;
   char *src = NULL;
-  char *target_header = NULL;
 
   remote_module_t kernel32 = {0};
   remote_module_t ntdll = {0};
@@ -249,11 +251,17 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  target_header = (char *)ptrace_do_malloc(ptrace_ctx, dll_size);
-  memset(target_header, 0, dll_size);
-  memcpy(target_header, src, HEADER_SIZE); // write the PE header only
-  void *remote_addr = ptrace_do_push_mem(ptrace_ctx, target_header);
-  printf("remote_addr=%p local_addr=%p\n", remote_addr, target_header);
+  char *local_header = (char *)ptrace_do_malloc(ptrace_ctx, dll_size);
+  memset(local_header, 0, dll_size);
+  memcpy(local_header, src, dll_nt->OptionalHeader.SizeOfHeaders);
+  void *remote_header = ptrace_do_push_mem(ptrace_ctx, local_header);
+  if (remote_header == NULL) {
+    perror("ptrace_do_push_mem");
+    err = 1;
+    goto cleanup;
+  }
+  printf("remote_header=%p local_header=%p\n", remote_header, local_header);
+
 
   // err = ptrace_do_syscall(target, 10, (unsigned long)remote_addr, dll_size,
   // PROT_READ | PROT_WRITE | PROT_EXEC, 0, 0, 0); printf("fd=%d\n", err);
@@ -267,7 +275,7 @@ int main(int argc, char *argv[]) {
     printf("section %d: name=%s size=%u\n", i, section->Name,
            section->SizeOfRawData);
 
-    if (remote_write(pid, remote_addr + section->VirtualAddress,
+    if (remote_write(pid, remote_header + section->VirtualAddress,
                      src + section->PointerToRawData,
                      section->SizeOfRawData) != 0) {
       perror("remote_write");
@@ -282,26 +290,47 @@ int main(int argc, char *argv[]) {
     goto cleanup;
   }
 
-  if (get_module(pid, "ntdll.dll", &ntdll) == -1) {
-    printf("ntdll.dll not found\n");
+  // kinda unoptimized but works
+  mapping_data_t mapping_data = {0};
+  mapping_data.load_library_a = get_function_address(&kernel32, "LoadLibraryA");
+  mapping_data.get_proc_address =
+      get_function_address(&kernel32, "GetProcAddress");
+  mapping_data.get_module_handle_a =
+      get_function_address(&kernel32, "GetModuleHandleA");
+  mapping_data.seh_support = 0;
+
+  if (kernel32.nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    if (get_module(pid, "ntdll.dll", &ntdll) == -1) {
+      printf("ntdll.dll not found\n");
+      err = 1;
+      goto cleanup;
+    }
+    mapping_data.rtl_add_function_table =
+        get_function_address(&ntdll, "RtlAddFunctionTable");
+    mapping_data.seh_support = mapping_data.rtl_add_function_table != NULL;
+  }
+
+  mapping_data.pbase = remote_header;
+  mapping_data.fwd_reason_param = DLL_PROCESS_ATTACH;
+  mapping_data.reserved_param = NULL;
+
+  char* local_mapping = (char *)ptrace_do_malloc(ptrace_ctx, sizeof(mapping_data_t));
+  memcpy(local_mapping, &mapping_data, sizeof(mapping_data_t));
+  void* remote_mapping = ptrace_do_push_mem(ptrace_ctx, local_mapping);
+  if (remote_mapping == NULL) {
+    perror("ptrace_do_push_mem");
     err = 1;
     goto cleanup;
   }
-
-  // kinda unoptimized but works
-  void *load_library = get_function_address(&kernel32, "LoadLibraryA");
-  void *get_proc_address = get_function_address(&kernel32, "GetProcAddress");
-  void *get_module_handle = get_function_address(&kernel32, "GetModuleHandleA");
+  printf("remote_mapping=%p\n", remote_mapping);
 
 
 
-  printf("load_library: %p get_proc_address: %p get_module_handle: %p\n",
-         load_library, get_proc_address, get_module_handle);
+
+
 
 cleanup:
 
-  // if (target_header)
-  //     free(target_header);
 
   printf("cleanup src: %p\n", src);
   if (src)
