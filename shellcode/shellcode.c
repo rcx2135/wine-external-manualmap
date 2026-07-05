@@ -21,13 +21,13 @@ typedef BOOL(WINAPIV *f_RtlAddFunctionTable_t)(RUNTIME_FUNCTION *FunctionTable,
 
 __attribute__((noinline, section(".text.shellcode"))) void __stdcall
 shellcode(mapping_data_t *p_data) {
-  if (!p_data)
-  // error on purpose
-  {
 
-    *(volatile int *)0 = 0;
+  if (!p_data) {
+    __asm__ __volatile__("int3");
     return;
   }
+  p_data->loader_ran = 1;
+  p_data->stage = 1;
 
   uint8_t *p_base = p_data->pbase;
   IMAGE_NT_HEADERS *nt =
@@ -44,7 +44,7 @@ shellcode(mapping_data_t *p_data) {
       (f_RtlAddFunctionTable_t)p_data->rtl_add_function_table;
 #endif
   f_DllMain_t _DllMain = (f_DllMain_t)(p_base + opt->AddressOfEntryPoint);
-
+  p_data->stage = 2;
   ULONG_PTR delta = (ULONG_PTR)p_base - (ULONG_PTR)opt->ImageBase;
   if (delta) {
     IMAGE_DATA_DIRECTORY *reloc_dir =
@@ -72,7 +72,7 @@ shellcode(mapping_data_t *p_data) {
       }
     }
   }
-
+  p_data->stage = 3;
   IMAGE_DATA_DIRECTORY *import_dir =
       &opt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
   if (import_dir->Size) {
@@ -80,11 +80,30 @@ shellcode(mapping_data_t *p_data) {
         (IMAGE_IMPORT_DESCRIPTOR *)(p_base + import_dir->VirtualAddress);
 
     while (p_import->Name) {
-      char *modName = (char *)(p_base + p_import->Name);
+        p_data->stage = 30;
+        p_data->last_import_desc = p_import;
+      char *mod_name = (char *)(p_base + p_import->Name);
+      p_data->last_module_name = mod_name;
+      p_data->stage = 31;
       HINSTANCE handle_dll =
-          _GetModuleHandleA ? (HINSTANCE)_GetModuleHandleA(modName) : NULL;
+          _GetModuleHandleA ? (HINSTANCE)_GetModuleHandleA(mod_name) : NULL;
+
+      p_data->stage = 32;
       if (!handle_dll)
-        handle_dll = _LoadLibraryA(modName);
+      {
+          p_data->stage = 33;
+          handle_dll = _LoadLibraryA(mod_name);
+          p_data->stage = 34;
+
+      }
+
+
+      if (!handle_dll) {
+        p_data->stage = 98;
+        __asm__ __volatile__("int3");
+        return;
+      }
+
       ULONG_PTR *p_thunk_ref =
           (ULONG_PTR *)(p_base + p_import->OriginalFirstThunk);
       ULONG_PTR *p_func_ref = (ULONG_PTR *)(p_base + p_import->FirstThunk);
@@ -93,20 +112,37 @@ shellcode(mapping_data_t *p_data) {
         p_thunk_ref = p_func_ref;
 
       for (; *p_thunk_ref; p_thunk_ref++, p_func_ref++) {
+
+        p_data->last_thunk = p_thunk_ref;
+
         if (IMAGE_SNAP_BY_ORDINAL(*p_thunk_ref)) {
+            p_data->stage = 35;
           *p_func_ref = (ULONG_PTR)_GetProcAddress(
               handle_dll, (char *)(*p_thunk_ref & 0xFFFF));
+            p_data->stage = 36;
         } else {
           IMAGE_IMPORT_BY_NAME *pByName =
               (IMAGE_IMPORT_BY_NAME *)(p_base + *p_thunk_ref);
+          p_data->last_function_name = pByName->Name;
+          p_data->stage = 37;
           *p_func_ref = (ULONG_PTR)_GetProcAddress(handle_dll, pByName->Name);
+         p_data->stage = 38;
+          p_data->last_resolved = (void *)*p_func_ref;
         }
+
+        if (!*p_func_ref) {
+             p_data->stage = 99;
+             __asm__ __volatile__("int3");
+             return;
+           }
       }
+
+
 
       p_import++;
     }
   }
-
+  p_data->stage = 4;
   IMAGE_DATA_DIRECTORY *tls_dir =
       &opt->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
   if (tls_dir->Size) {
@@ -133,12 +169,14 @@ shellcode(mapping_data_t *p_data) {
     }
   }
 #endif
-
+  p_data->stage = 5;
   _DllMain(p_base, p_data->fwd_reason_param, p_data->reserved_param);
+  p_data->stage = 6;
 
   p_data->success = !seh_failed;
+
   // intentionally raise a segfault
-  *(volatile int *)0 = 0;
+  __asm__ __volatile__("int3");
 }
 
 /*
