@@ -343,6 +343,9 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  kill(pid, SIGSTOP);
+
+
   printf("dll size %lu size of image %u\n", dll_size, dll_opt->SizeOfImage);
   char *local_header =
       (char *)ptrace_do_malloc(ptrace_ctx, dll_opt->SizeOfImage);
@@ -566,6 +569,6 @@ cleanup:
   printf("cleanup ptrace_ctx: %p\n", ptrace_ctx);
   if (ptrace_ctx)
     ptrace_do_cleanup(ptrace_ctx);
-
+  kill(pid, SIGCONT);
   return err;
 }
