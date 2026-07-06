@@ -26,8 +26,6 @@ shellcode(mapping_data_t *p_data) {
     __asm__ __volatile__("int3");
     return;
   }
-  p_data->loader_ran = 1;
-  p_data->stage = 1;
 
   uint8_t *p_base = p_data->pbase;
   IMAGE_NT_HEADERS *nt =
@@ -44,7 +42,6 @@ shellcode(mapping_data_t *p_data) {
       (f_RtlAddFunctionTable_t)p_data->rtl_add_function_table;
 #endif
   f_DllMain_t _DllMain = (f_DllMain_t)(p_base + opt->AddressOfEntryPoint);
-  p_data->stage = 2;
   ULONG_PTR delta = (ULONG_PTR)p_base - (ULONG_PTR)opt->ImageBase;
   if (delta) {
     IMAGE_DATA_DIRECTORY *reloc_dir =
@@ -72,34 +69,27 @@ shellcode(mapping_data_t *p_data) {
       }
     }
   }
-  p_data->stage = 3;
+
   IMAGE_DATA_DIRECTORY *import_dir =
       &opt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-  if (import_dir->Size) {
+  if (import_dir->VirtualAddress && import_dir->Size &&
+      import_dir->VirtualAddress < opt->SizeOfImage) {
     IMAGE_IMPORT_DESCRIPTOR *p_import =
         (IMAGE_IMPORT_DESCRIPTOR *)(p_base + import_dir->VirtualAddress);
 
-    while (p_import->Name) {
-        p_data->stage = 30;
-        p_data->last_import_desc = p_import;
+    DWORD max_imports = import_dir->Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    if (!max_imports || max_imports > 1024)
+      max_imports = 1024;
+
+    for (DWORD import_i = 0; import_i < max_imports && p_import->Name;
+         import_i++, p_import++) {
+
       char *mod_name = (char *)(p_base + p_import->Name);
-      p_data->last_module_name = mod_name;
-      p_data->stage = 31;
+
       HINSTANCE handle_dll =
           _GetModuleHandleA ? (HINSTANCE)_GetModuleHandleA(mod_name) : NULL;
 
-      p_data->stage = 32;
-      if (!handle_dll)
-      {
-          p_data->stage = 33;
-          handle_dll = _LoadLibraryA(mod_name);
-          p_data->stage = 34;
-
-      }
-
-
       if (!handle_dll) {
-        p_data->stage = 98;
         __asm__ __volatile__("int3");
         return;
       }
@@ -111,38 +101,33 @@ shellcode(mapping_data_t *p_data) {
       if (!p_import->OriginalFirstThunk)
         p_thunk_ref = p_func_ref;
 
-      for (; *p_thunk_ref; p_thunk_ref++, p_func_ref++) {
-
-        p_data->last_thunk = p_thunk_ref;
+      for (DWORD thunk_i = 0; thunk_i < 4096 && *p_thunk_ref;
+           thunk_i++, p_thunk_ref++, p_func_ref++) {
 
         if (IMAGE_SNAP_BY_ORDINAL(*p_thunk_ref)) {
-            p_data->stage = 35;
           *p_func_ref = (ULONG_PTR)_GetProcAddress(
               handle_dll, (char *)(*p_thunk_ref & 0xFFFF));
-            p_data->stage = 36;
         } else {
+          ULONG_PTR name_rva = *p_thunk_ref;
+          if (name_rva >= opt->SizeOfImage) {
+            __asm__ __volatile__("int3");
+            return;
+          }
+
           IMAGE_IMPORT_BY_NAME *pByName =
-              (IMAGE_IMPORT_BY_NAME *)(p_base + *p_thunk_ref);
-          p_data->last_function_name = pByName->Name;
-          p_data->stage = 37;
+              (IMAGE_IMPORT_BY_NAME *)(p_base + name_rva);
+
           *p_func_ref = (ULONG_PTR)_GetProcAddress(handle_dll, pByName->Name);
-         p_data->stage = 38;
-          p_data->last_resolved = (void *)*p_func_ref;
         }
 
         if (!*p_func_ref) {
-             p_data->stage = 99;
-             __asm__ __volatile__("int3");
-             return;
-           }
+          __asm__ __volatile__("int3");
+          return;
+        }
       }
-
-
-
-      p_import++;
     }
   }
-  p_data->stage = 4;
+
   IMAGE_DATA_DIRECTORY *tls_dir =
       &opt->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
   if (tls_dir->Size) {
@@ -169,13 +154,11 @@ shellcode(mapping_data_t *p_data) {
     }
   }
 #endif
-  p_data->stage = 5;
+
   _DllMain(p_base, p_data->fwd_reason_param, p_data->reserved_param);
-  p_data->stage = 6;
 
   p_data->success = !seh_failed;
 
-  // intentionally raise a segfault
   __asm__ __volatile__("int3");
 }
 
@@ -185,6 +168,6 @@ x86_64-w64-mingw32-gcc shellcode/shellcode.c -c -O0 \
        -fno-unwind-tables \
        -ffunction-sections -fdata-sections \
        -o shell.o
-objcopy -O binary -j .text.mm_shellcode shell.o mm_shellcode.bin
+objcopy -O binary -j .text.shellcode shell.o shellcode.bin
 
  */
