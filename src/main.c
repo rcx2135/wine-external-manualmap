@@ -147,6 +147,15 @@ int remote_write(pid_t pid, void *remote, void *local, size_t size) {
   return 0;
 }
 
+static void remote_zero(pid_t pid, void *addr, size_t size) {
+  void *buf = calloc(1, size);
+  if (!buf)
+    return;
+
+  remote_write(pid, addr, buf, size);
+  free(buf);
+}
+
 void free_module(remote_module_t *module) {
   if (module->image) {
     free(module->image);
@@ -156,6 +165,9 @@ void free_module(remote_module_t *module) {
     free(module->header);
     module->header = NULL;
   }
+  module->base = NULL;
+  module->dos = NULL;
+  module->nt = NULL;
 }
 
 int get_module(pid_t pid, const char *module_name, remote_module_t *module) {
@@ -408,7 +420,7 @@ int main(int argc, char *argv[]) {
     if (ptrace_do_syscall(ptrace_ctx, 10,
                           (unsigned long)remote_header +
                               section->VirtualAddress,
-                          section->SizeOfRawData,
+                          section->Misc.VirtualSize,
                           PROT_READ | PROT_WRITE | PROT_EXEC, 0, 0, 0) == -1) {
       perror("ptrace_do_syscall");
       err = 1;
@@ -596,24 +608,27 @@ cleanup:
   // blank out unneeded stuff after execution like headers, and the mapping data
   // // and loader itself
   if (remote_header) {
-      char* zeroes = calloc(1, sizeof(dll_nt->OptionalHeader.SizeOfHeaders));
-      remote_write(pid, remote_header, zeroes, sizeof(dll_nt->OptionalHeader.SizeOfHeaders));
-      free(zeroes);
+    remote_zero(pid, remote_header, dll_opt->SizeOfHeaders);
+    section = IMAGE_FIRST_SECTION(dll_nt);
+    for (uint32_t i = 0; i < dll_nt->FileHeader.NumberOfSections;
+         i++, section++) {
+      if (!section->SizeOfRawData)
+        continue;
+
+      // if there's issues with hooks this is probably the cause and should be removed
+      ptrace_do_syscall(ptrace_ctx, 10,
+                        (unsigned long)remote_header + section->VirtualAddress,
+                        section->Misc.VirtualSize, PROT_READ | PROT_EXEC, 0, 0, 0);
+    }
   }
 
-  if (remote_mapping) {
-    char *zeroes = calloc(1, sizeof(mapping_data_t));
-    remote_write(pid, remote_mapping, zeroes, sizeof(mapping_data_t));
-    free(zeroes);
-  }
+  if (remote_mapping)
+    remote_zero(pid, remote_mapping, sizeof(mapping_data_t));
 
   if (remote_shellcode) {
-    char *zeroes = calloc(1, sizeof(shellcode));
-    remote_write(pid, remote_shellcode, zeroes, sizeof(shellcode));
-    free(zeroes);
-
-    ptrace_do_syscall(ptrace_ctx, 10, (unsigned long)remote_header,
-                      dll_opt->SizeOfImage, PROT_READ | PROT_WRITE, 0, 0, 0);
+    remote_zero(pid, remote_shellcode, sizeof(shellcode));
+    ptrace_do_syscall(ptrace_ctx, 10, (unsigned long)remote_shellcode,
+                      sizeof(shellcode), PROT_READ | PROT_WRITE, 0, 0, 0);
   }
 
   printf("cleanup ptrace_ctx: %p\n", ptrace_ctx);
